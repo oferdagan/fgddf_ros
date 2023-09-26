@@ -4,11 +4,13 @@ from typing import Counter
 from fglib import graphs, nodes, inference, rv, utils
 import networkx as nx
 import numpy as np
+import random
 import scipy.linalg
 import scipy.io as sio
 from scipy.io import savemat
 import itertools
 from copy import deepcopy
+import time
 
 import fgDDF
 
@@ -16,7 +18,7 @@ from fgDDF.agent import *
 from fgDDF.factor_utils import *
 from fgDDF.FG_KF import *
 from fgDDF.fusionAlgo import *
-from fgDDF.inputFile_2T_2A import *
+from fgDDF.inputFile_5T_2A import *
 
 import rospy
 import rospkg
@@ -25,6 +27,8 @@ from std_msgs.msg import String
 from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped
 from fgddf_ros.msg import ChannelFilter
 from fgddf_ros.msg import Results
+from fgddf_ros.msg import TruthData
+from fgddf_ros.msg import CurrentMeasData
 
 # Function definitions
 def get_target_pos(current_agent):
@@ -59,7 +63,17 @@ def convertMsgToDict(msg):
 # ROS callback functions
 def callback(data, agent):
     if data.recipient == agent["agent"].id:
-        agent["agent"].fusion.fusionLib[data.sender].inMsg = convertMsgToDict(data)
+        try: # inMsg already exists
+            agent["agent"].fusion.fusionLib[data.sender].inMsg # Tests to see if inMsg already exists
+
+            counter = max(agent["agent"].fusion.fusionLib[data.sender].inMsg.keys())+1
+            agent["agent"].fusion.fusionLib[data.sender].inMsg[counter] = convertMsgToDict(data)[1]
+        except:# inMsg doesn't already exist
+            agent["agent"].fusion.fusionLib[data.sender].inMsg = convertMsgToDict(data)
+
+        receive = np.random.choice(2, 1, p=[1-pMsg, pMsg])
+        if receive == 0:
+            agent["agent"].fusion.fusionLib[data.sender].inMsg = None
 
 def boss_callback(msg):
     pass
@@ -279,6 +293,7 @@ if (target20 is not None):
 # instanciate filters and agents:
 for i, a in enumerate(agents):
     print("Initializing agent:", i)
+    # a = agents[i]
     a["filter"] = FG_KF(variables, varSet[i], a["measData"], uData)
     a["agent"] = agent(
         varSet[i], dynamicList, a["filter"], "HS_CF", i, condVar[i], variables
@@ -313,6 +328,7 @@ for i, a in enumerate(agents):
 
 # set initial fusion defenitions:
 for i, a in enumerate(agents):
+    # a = agents[i]
     for n in a["neighbors"]:
         a["agent"].set_fusion(agents[n]["agent"], variables)
         # Add prediction nodes to the agent's CF graph
@@ -329,6 +345,7 @@ for i, a in enumerate(agents):
 
 # Recive messages, time step 1:
 for i, a in enumerate(agents):
+    # a = agents[i]
     print("agent", i)
     for n in a["neighbors"]:
         # recieve message (a dictionary of factors):
@@ -336,8 +353,16 @@ for i, a in enumerate(agents):
         msg = agents[n]["agent"].sendMsg(agents, n, i)
         a["agent"].fusion.fusionLib[n].inMsg = msg
 
+        outMsg = agents[i]["agent"].sendMsg(agents, i, n)
+        agents[i]["agent"].fusion.fusionLib[n].outMsg = outMsg
+
+        receive = np.random.choice(2, 1, p=[1-pMsg, pMsg])
+        if receive == 0:
+            a["agent"].fusion.fusionLib[n].inMsg = None
+
 # Fuse incoming messages, time step 1:
 for a in agents:
+    # a = agents[a]
     # if len(agents[a]['neighbors'])>0:
     a["agent"].fuseMsg()
     for key in a["agent"].fusion.commonVars:
@@ -345,12 +370,14 @@ for a in agents:
         # TODO check if mergeFactors works with dynamic variables
 
 for a in agents:
+    # a = agents[a]
     a["agent"].build_semiclique_tree()
 
 
 tmpGraph = dict()
 # Inference
 for i, a in enumerate(agents):
+    # a = agents[i]
     tmpGraph[i] = a["agent"].add_factors_to_clique_fg()
 
     a["results"][0] = dict()  # m is the MC run number
@@ -379,6 +406,7 @@ for i, a in enumerate(agents):
     else:
         for n in tmpGraph[i].get_vnodes():
             varCount = 0
+            # print(tmpGraph[i].nodes[n]["dims"])
             belief = inference.sum_product(tmpGraph[i], n)
             try:
                 vNames = tmpGraph[i].nodes[n]["dims"]
@@ -419,6 +447,7 @@ for i, a in enumerate(agents):
 del tmpGraph
 
 pub_results = rospy.Publisher("results", Results, queue_size=10)
+pub_current_meas_data = rospy.Publisher("current_meas_data", CurrentMeasData, queue_size=10)
 
 k = 2
 rospy.sleep(1)
@@ -481,7 +510,16 @@ while not rospy.is_shutdown() and (k < 200):
             data.infVec = msg["infVec"]
             pub.publish(data)
 
+        # outMsg = ag["agent"].sendMsg(agents, ag_idx, n)
+        ag["agent"].fusion.fusionLib[n].outMsg = msgs
+
     rospy.wait_for_message("boss", String)  # Wait for go ahead
+
+    # for n in ag["neighbors"]:
+    #     receive = np.random.choice(2, 1, p=[1-pMsg, pMsg])
+    #     if receive == 0:
+    #         ag["agent"].fusion.fusionLib[n].inMsg = None
+
     ag["agent"].fuseMsg()
 
     for key in ag["agent"].fusion.commonVars:
@@ -492,6 +530,7 @@ while not rospy.is_shutdown() and (k < 200):
     # inference
     jointInfMat = buildJointMatrix(ag["agent"])
     tmpGraph[ag["agent"].id] = ag["agent"].add_factors_to_clique_fg()
+
     if ag["agent"].clique_fg.graph["cliqueFlag"] == 0:
         for n in tmpGraph[ag["agent"].id].get_vnodes():
             varStr = str(n)
@@ -539,10 +578,21 @@ while not rospy.is_shutdown() and (k < 200):
                 ag["results"][0][(varStr + "_mu")] = np.array(belief.mean)
                 ag["results"][0][(varStr + "_cov")] = np.array(belief.cov)
 
+            
+
         ag["results"][0]["FullCov"] = np.array(jointInfMat.factor.cov)
         ag["results"][0]["FullMu"] = np.array(jointInfMat.factor.mean)
     del tmpGraph
     k += 1
+
+    for md in range(len(ag["measData"])):
+        current_meas_data = CurrentMeasData()
+        current_meas_data.TimeStep = k-1
+        current_meas_data.Agent = "S" + str(ag_idx + 1)
+        current_meas_data.MeasuredVars = ag["measData"][md]["measuredVars"]
+        current_meas_data.Data = ag["currentMeas"][md]
+
+        pub_current_meas_data.publish(current_meas_data)
 
     for var in ag["agent"].varSet:
         ag_tag = "S" + str(ag_idx + 1)

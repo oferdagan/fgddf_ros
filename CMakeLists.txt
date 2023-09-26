@@ -52,6 +52,8 @@ add_message_files(
   FILES
   ChannelFilter.msg
   Results.msg
+  TruthData.msg
+  CurrentMeasData.msg
 )
 
 ## Generate services in the 'srv' folder
