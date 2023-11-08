@@ -29,7 +29,7 @@ Follow the following steps to run a fgddf_ros experiment. Each number should be 
     ```
     source <ros_path>/setup.bash
     source ./network.sh XXX XXX
-    rosbag record /truth_data /results
+    rosbag record /truth_data /results /measurements
     ```
 5. On EACH robot:
     ```
